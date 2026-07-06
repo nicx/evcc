@@ -24,7 +24,7 @@ from typing import Optional
 
 import rumps
 
-from . import autostart, backup, health, lifecycle, logs, menubar_icon, notify, paths, updater
+from . import autostart, backup, dialogs, health, lifecycle, logs, menubar_icon, notify, paths, updater
 from .config.settings import Settings, load_settings, save_settings
 from .notifier_state import NotifierState
 
@@ -185,14 +185,11 @@ class EvccMenuApp(rumps.App):
     # -- Dialog-Helfer -------------------------------------------------------
 
     def _ask_text(self, message: str, title: str, default: str = "") -> Optional[str]:
-        win = rumps.Window(message=message, title=title, default_text=default,
-                           ok="OK", cancel="Abbrechen", dimensions=(320, 24))
-        resp = win.run()
-        return resp.text.strip() if resp.clicked == 1 else None
+        # Native NSAlert-Texteingabe (rumps-frei, siehe :mod:`src.dialogs`).
+        return dialogs.ask_text(title, message, default)
 
     def _ask_yes_no(self, message: str, title: str) -> bool:
-        win = rumps.Window(message=message, title=title, ok="Ja", cancel="Nein", dimensions=(1, 1))
-        return win.run().clicked == 1
+        return dialogs.ask_yes_no(title, message)
 
     def _ask_directory(self, message: str, default: Optional[str] = None) -> Optional[str]:
         try:
@@ -227,7 +224,7 @@ class EvccMenuApp(rumps.App):
         try:
             subprocess.run(["open", self.settings.health.url], check=False, timeout=10)
         except (OSError, subprocess.SubprocessError) as exc:
-            rumps.alert("Web-UI", f"Konnte {self.settings.health.url} nicht öffnen: {exc}")
+            dialogs.alert("Web-UI", f"Konnte {self.settings.health.url} nicht öffnen: {exc}")
 
     def _start(self, _sender=None) -> None:
         self._spawn(self._do_start)
@@ -382,7 +379,7 @@ class EvccMenuApp(rumps.App):
 
     def _rollback(self, _sender=None) -> None:
         if not paths.evcc_binary_previous().exists():
-            rumps.alert("Rollback", "Kein Vorgänger-Binary vorhanden.")
+            dialogs.alert("Rollback", "Kein Vorgänger-Binary vorhanden.")
             return
         if not self._ask_yes_no(
                 "Auf vorherige evcc-Version zurückrollen?\n\nHinweis: funktioniert nur bei "
@@ -415,7 +412,7 @@ class EvccMenuApp(rumps.App):
         cfg = self.settings.backup
         if not cfg.target_path:
             if announce:
-                rumps.alert("Backup", "Kein Backup-Ziel gesetzt. Bitte 'Backup-Ziel wählen…'.")
+                dialogs.alert("Backup", "Kein Backup-Ziel gesetzt. Bitte 'Backup-Ziel wählen…'.")
             return False
         try:
             target = backup.hot_backup(paths.db_file(), Path(cfg.target_path), paths.evcc_yaml())
@@ -428,7 +425,7 @@ class EvccMenuApp(rumps.App):
         except backup.BackupError as exc:
             self.notifier.problem("backup_failed", str(exc))
             if announce:
-                rumps.alert("Backup fehlgeschlagen", str(exc))
+                dialogs.alert("Backup fehlgeschlagen", str(exc))
             return False
 
     def _choose_backup_target(self, _sender=None) -> None:
@@ -447,7 +444,7 @@ class EvccMenuApp(rumps.App):
 
     def _show_last_lines(self, _sender=None) -> None:
         text = logs.tail(paths.evcc_log_file(), 50) or "(Logfile noch leer oder nicht vorhanden.)"
-        rumps.alert("evcc – letzte 50 Zeilen", text)
+        dialogs.show_text("evcc – letzte 50 Zeilen", text)
 
     def _set_log_level(self, level: str, _sender=None) -> None:
         self.settings.logging.level = level
@@ -564,7 +561,7 @@ class EvccMenuApp(rumps.App):
         else:
             args = self._autostart_program_args()
             if args is None:
-                rumps.alert(
+                dialogs.alert(
                     "Autostart nur im .app-Bundle",
                     "Der Login-Autostart funktioniert nur für die gebaute App-Bundle-Version. "
                     "Im Entwicklungsmodus (python -m src.app) ist er nicht verfügbar.")

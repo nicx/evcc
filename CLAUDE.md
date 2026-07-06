@@ -28,6 +28,7 @@ damit eine frische Claude-Session (auch auf einem anderen Mac) sofort produktiv 
 |---|---|
 | `app.py` | rumps.App: Menü (Spec §6), Timer, Threading, Dialoge, verdrahtet alle Module |
 | `settings_window.py` | natives Settings-**Fenster** (PyObjC/`NSWindow`+`NSGridView`) + reine `build_settings`-Validierung; **rumps-frei** — erster Baustein der rumps→PyObjC-Vereinheitlichung |
+| `dialogs.py` | native **NSAlert**-Dialoge (`alert`/`ask_yes_no`/`ask_text`/`show_text`), **rumps-frei**, Main-Thread-Marshalling via `_run_on_main` — zweiter Baustein (ersetzt `rumps.alert`/`rumps.Window`) |
 | `lifecycle.py` | Binary-Download/-Install, Tar-Extraktion, Quarantäne entfernen, Rollback, launchctl |
 | `health.py` | HTTP-Poll `:7070` → `running|stopped|unreachable`, Fehler-Schwellwert |
 | `backup.py` | `sqlite3.Connection.backup()` (WAL-sicher), Retention, `BackupScheduler` |
@@ -118,16 +119,16 @@ vereinheitlichen, rumps mittelfristig ablösen.** Eine Sprache, ein Repo, Tests 
 IPC. Der aktuelle Dual-Style (rumps-Menü + PyObjC-Fenster) ist **nur Übergang**, kein Zielbild.
 
 Leitplanke für jede Änderung: **rumps-Kopplung nicht vertiefen** — neue UI ausschließlich
-PyObjC. Erledigter erster Baustein: das Settings-`settings_window.py` (rumps-frei).
+PyObjC. Erledigte Bausteine: `settings_window.py` (rumps-frei) **und** `dialogs.py` (alle
+`rumps.alert`/`rumps.Window` durch native `NSAlert` ersetzt, Main-Thread-sicher).
 
 Verbleibende, je eigenständig ausliefer- und testbare Bricks (verifizierte Teile bleiben bis
 dahin unangetastet):
-1. **Dialoge** — restliche `rumps.alert`/`rumps.Window` (`_show_last_lines`, Rollback-/Backup-
-   Bestätigungen, Fehler-Alerts) auf einen kleinen `NSAlert`-Helfer. Günstigster nächster Schritt.
-2. **Statusleiste** — `rumps.App`/`rumps.MenuItem` → `NSStatusItem` + `NSMenu`.
-3. **Timer** — `rumps.Timer` → `NSTimer`/`DispatchSource`.
-4. **Notifications** — `rumps.notification` → `UNUserNotificationCenter` (pync-Fallback entfällt).
-5. **Runloop + Dependency** — eigene `NSApplication`-Runloop, danach `rumps` aus `requirements.txt`.
+1. **Statusleiste** — `rumps.App`/`rumps.MenuItem` → `NSStatusItem` + `NSMenu`.
+2. **Timer** — `rumps.Timer` → `NSTimer`/`DispatchSource`.
+3. **Notifications** — `rumps.notification` → `UNUserNotificationCenter` (pync-Fallback entfällt).
+4. **Runloop + Dependency** — eigene `NSApplication`-Runloop, danach `rumps` aus `requirements.txt`.
 
 Reihenfolge minimiert Risiko (zuerst das Störende, zuletzt die stabile Runloop); jeder Brick hält
-die Suite grün.
+die Suite grün. Verbleibende rumps-Nutzung in `app.py`: nur noch `App`/`MenuItem`/`separator`
+(Brick 1), `Timer` (Brick 2), `quit_application` (Brick 4).
