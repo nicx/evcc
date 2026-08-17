@@ -24,6 +24,19 @@ if [[ ! -x "$PY" ]]; then
   exit 1
 fi
 
+# Läuft die App aus genau diesem dist/, würde der Build ihr das Bundle unter den Füßen
+# weglöschen: der Prozess liefe mit ALTEM Code aus einem gelöschten Bundle weiter, macOS
+# graut ihn aus, das Menü reagiert nicht mehr — beenden ginge nur noch per `kill`.
+# (Der evcc-Agent selbst hängt an launchd und ist davon unberührt.)
+# Aus /Applications gestartete Instanzen sind unkritisch.
+RUNNING="$(pgrep -f "$ROOT/$APP/Contents/MacOS/evcc" || true)"
+if [[ -n "$RUNNING" ]]; then
+  echo "ABBRUCH: evcc läuft gerade aus $ROOT/dist (PID: ${RUNNING//$'\n'/ })." >&2
+  echo "         Der Build würde das laufende Bundle löschen." >&2
+  echo "         Erst die App beenden (Menüleiste -> Beenden), dann erneut bauen." >&2
+  exit 1
+fi
+
 echo "==> Build-Abhängigkeiten"
 "$PY" -m pip install --quiet -r requirements-build.txt
 
