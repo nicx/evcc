@@ -6,8 +6,8 @@ Modul in einer späteren reinen AppKit-Shell unverändert weiterlebt.
 
 Threading: NSAlert/NSTextField/NSTextView dürfen nur auf dem Main-Thread laufen.
 Da einige Aufrufer (z. B. der Backup-Pfad in :mod:`src.app`) aus Daemon-Threads
-kommen, marshallt jeder Helfer via :func:`_run_on_main` **synchron** auf den
-Main-Thread und reicht dessen Rückgabe (bzw. Ausnahme) an den Aufrufer zurück.
+kommen, marshallt jeder Helfer via :func:`src.mainthread.run_on_main` **synchron**
+auf den Main-Thread und reicht dessen Rückgabe (bzw. Ausnahme) an den Aufrufer zurück.
 
 AppKit wird **lazy innerhalb der Funktionen** importiert, damit das Modul auch
 ohne GUI importierbar bleibt (parallel zu ``settings_window``).
@@ -16,42 +16,11 @@ ohne GUI importierbar bleibt (parallel zu ``settings_window``).
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Callable, Optional, TypeVar
+from typing import Optional
+
+from .mainthread import run_on_main as _run_on_main
 
 LOGGER = logging.getLogger(__name__)
-
-T = TypeVar("T")
-
-
-def _run_on_main(func: Callable[[], T]) -> T:
-    """Führt ``func`` synchron auf dem Main-Thread aus und reicht Rückgabe/Fehler durch.
-
-    Auf dem Main-Thread direkt; sonst über die Main-Operation-Queue dispatchen und
-    per :class:`threading.Event` auf das Ergebnis warten. Voraussetzung ist ein
-    laufender Main-Runloop (rumps/NSApplication liefert den).
-    """
-    from Foundation import NSOperationQueue, NSThread
-
-    if NSThread.isMainThread():
-        return func()
-
-    box: dict = {}
-    done = threading.Event()
-
-    def _wrapper() -> None:
-        try:
-            box["value"] = func()
-        except Exception as exc:  # noqa: BLE001 - auf den Aufrufer-Thread weiterreichen
-            box["error"] = exc
-        finally:
-            done.set()
-
-    NSOperationQueue.mainQueue().addOperationWithBlock_(_wrapper)
-    done.wait()
-    if "error" in box:
-        raise box["error"]
-    return box.get("value")
 
 
 def _activate() -> None:

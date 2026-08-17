@@ -7,9 +7,12 @@ damit eine frische Claude-Session (auch auf einem anderen Mac) sofort produktiv 
 - **Repo:** https://github.com/nicx/evcc (public)
 - **Spec (Original-Handoff):** [evcc-app-spec.md](evcc-app-spec.md)
 - **Detaillierter Umsetzungsplan:** [docs/PLAN.md](docs/PLAN.md)
-- **Stack:** Python 3.13 · rumps · py2app · launchd · SQLite · lokales MailRelay
+- **Stack:** Python 3.13 · **PyObjC/AppKit** · py2app · launchd · SQLite · lokales MailRelay
 - **Herkunft:** Bausteine (notify, keychain, settings, autostart, menubar_icon, py2app-Skelett)
   sind aus dem Schwesterprojekt `icloud-sync` **portiert**, nicht neu gebaut.
+- **UI-Toolkit:** die Menüleisten-UI ist vollständig PyObjC; `rumps` (und der
+  `pync`-Notification-Fallback) sind seit der Umstellung **entfernt** — siehe
+  „Richtung: PyObjC" am Ende.
 
 ## Architektur
 
@@ -19,22 +22,29 @@ damit eine frische Claude-Session (auch auf einem anderen Mac) sofort produktiv 
   `launchctl` (`bootstrap` / `bootout` / `kickstart -k`, Legacy `load/unload -w` als Fallback).
 - DB-Pfad & Loglevel werden als **CLI-Flags ins Plist** geschrieben
   (`--database <pfad> --log <level>`), nicht über eine separate evcc.yaml.
-- **2-Tier-Timer** in `app.py`: Health-Poll-Timer (Default 30 s) + 1-s-UI-Refresh-Timer;
-  zusätzlich periodischer Update-Check-Timer (Default 24 h) und interner Backup-Scheduler.
+- **2-Tier-Timer** in `app.py` (`timers.RepeatingTimer` = `NSTimer`): Health-Poll-Timer
+  (Default 30 s) + 1-s-UI-Refresh-Timer; zusätzlich periodischer Update-Check-Timer
+  (Default 24 h) und interner Backup-Scheduler.
 - Langlaufendes läuft im Daemon-Thread (`_spawn`), serialisiert über `threading.Lock`.
+- **Threading-Regel:** AppKit nur auf dem Main-Thread. Hintergrund-Threads setzen keine UI
+  direkt, sondern gehen über `mainthread.run_on_main`/`post_to_main`; die UI-Schichten
+  (`statusitem`, `timers`, `dialogs`, `notify`) marshallen bereits selbst.
 
 ### Modulübersicht (`src/`)
 | Datei | Zweck |
 |---|---|
-| `app.py` | rumps.App: Menü (Spec §6), Timer, Threading, Dialoge, verdrahtet alle Module |
-| `settings_window.py` | natives Settings-**Fenster** (PyObjC/`NSWindow`+`NSGridView`) + reine `build_settings`-Validierung; **rumps-frei** — erster Baustein der rumps→PyObjC-Vereinheitlichung |
-| `dialogs.py` | native **NSAlert**-Dialoge (`alert`/`ask_yes_no`/`ask_text`/`show_text`), **rumps-frei**, Main-Thread-Marshalling via `_run_on_main` — zweiter Baustein (ersetzt `rumps.alert`/`rumps.Window`) |
+| `app.py` | `EvccApp` + `NSApplication`-Runloop: Menü-Spezifikation (Spec §6), Timer, Threading, verdrahtet alle Module |
+| `statusitem.py` | **NSStatusItem/NSMenu**: `MenuEntry`/`SEPARATOR` als reine Datenschicht (unit-testbar) + AppKit-Übersetzung; ein langlebiges `_MenuTarget` verteilt Klicks per `tag` |
+| `timers.py` | **NSTimer**-Wrapper (`RepeatingTimer`) mit start/stop/änderbarem Intervall; Callback läuft auf dem Main-Thread |
+| `mainthread.py` | Main-Thread-Marshalling (`run_on_main` synchron, `post_to_main` asynchron) — **eine** Quelle der Threading-Regel für alle UI-Module |
+| `settings_window.py` | natives Settings-**Fenster** (PyObjC/`NSWindow`+`NSGridView`) + reine `build_settings`-Validierung |
+| `dialogs.py` | native **NSAlert**-Dialoge (`alert`/`ask_yes_no`/`ask_text`/`show_text`) |
 | `lifecycle.py` | Binary-Download/-Install, Tar-Extraktion, Quarantäne entfernen, Rollback, launchctl |
 | `health.py` | HTTP-Poll `:7070` → `running|stopped|unreachable`, Fehler-Schwellwert |
 | `backup.py` | `sqlite3.Connection.backup()` (WAL-sicher), Retention, `BackupScheduler` |
 | `updater.py` | GitHub-Release-API, Versionsvergleich, Asset-Wahl, SHA256 |
 | `logs.py` | Tail, Console.app öffnen, größenbasierte Rotation |
-| `notify.py` | macOS-Notification + `send_mail` (klartext-SMTP an lokales Relay) — **PORT** |
+| `notify.py` | macOS-Notification via **UNUserNotificationCenter** + `send_mail` (klartext-SMTP an lokales Relay) |
 | `notifier_state.py` | **State-Machine-Debounce**: Mail nur bei Zustandswechsel; `notify_event` für Update-Infos |
 | `auth/keychain.py` | `keyring`-Wrapper (Service `evcc`) — aktuell ohne Pflicht-Consumer |
 | `config/settings.py` | verschachtelte Settings-Dataclasses + JSON (`config.json`), tolerant geladen |
@@ -83,7 +93,7 @@ Outline + rotes Badge `🔴` = nicht erreichbar. Alles Template-Images (auto-get
 .venv/bin/pip install -r requirements.txt
 # Dev-Run (Menüleisten-App ohne Bundle)
 .venv/bin/python -m src.app
-# Tests (mock-frei, kein Netz) — derzeit 41 grün
+# Tests (mock-frei, kein Netz) — derzeit 56 grün
 for t in tests/test_*.py; do .venv/bin/python "$t"; done
 # Build der .app (py2app + ad-hoc-Signierung + verify)
 .venv/bin/pip install -r requirements-build.txt
@@ -108,27 +118,42 @@ Build/dist/venv/Logs/DB sind via `.gitignore` ausgeschlossen.
   scheitern → im Zweifel zusätzlich das DB-Backup zurückspielen (im UI so kommuniziert).
 - **GUI-Autostart nur im gebauten Bundle** (`sys.frozen`), nicht im Dev-Modus
   (`python -m src.app`) — `autostart` löst sonst keine sinnvollen ProgramArguments auf.
-- **Menüleisten-Icons müssen quadratisch sein:** rumps zwingt das Icon auf 20×20, ein
-  nicht-quadratisches Rep würde gestaucht — `menubar_icon` rendert daher ins Quadrat mit
-  erhaltenem Seitenverhältnis.
+- **Menüleisten-Icons müssen quadratisch sein:** `statusitem` setzt das Icon per
+  `setSize_` auf 20×20 pt (ohne das interpretiert `NSImage` die **Pixelmaße** der PNG als
+  Punkte und sprengt die Menüleiste). Ein nicht-quadratisches Rep würde dabei gestaucht —
+  `menubar_icon` rendert daher ins Quadrat mit erhaltenem Seitenverhältnis.
+- **Notifications brauchen das echte Bundle:** `UNUserNotificationCenter` liefert nur aus,
+  wenn der Prozess über den **App-Stub** `evcc.app/Contents/MacOS/evcc` startet. Im
+  Dev-Modus (`python -m src.app`) *und* beim direkten Aufruf des eingebetteten
+  `Contents/MacOS/python` lehnt macOS mit „Notifications are not allowed for this
+  application" ab. Das ist **kein Bug** — nur im gebauten Bundle testen (verifiziert:
+  `granted=True`, Zustellung ohne Fehler).
+- **`NSMenu` deaktiviert Einträge selbst:** ohne `setAutoenablesItems_(False)` überschreibt
+  AppKit den Aktiv-Zustand anhand der Responder-Chain und aktiviert die bewusst
+  deaktivierten Info-Zeilen (Status/Version) wieder.
+- **`NSMenuItem.target` ist eine schwache Referenz:** ein pro Eintrag erzeugtes Ziel-Objekt
+  würde deallokiert und der Klick liefe ins Leere. Daher **ein** langlebiges `_MenuTarget`
+  je `StatusItem`, Zuordnung über `tag`.
+- **UI-Timer feuern bewusst nicht im Event-Tracking-Modus** (nur `NSDefaultRunLoopMode`):
+  sonst würde ein Menü-Neuaufbau dem Nutzer das **geöffnete** Menü wegziehen.
 
-## Richtung: rumps → PyObjC (gestaffelt)
+## Richtung: PyObjC (Umstellung abgeschlossen)
 
-Strategische Festlegung: **bei Python bleiben und die UI schrittweise auf PyObjC
-vereinheitlichen, rumps mittelfristig ablösen.** Eine Sprache, ein Repo, Tests bleiben, kein
-IPC. Der aktuelle Dual-Style (rumps-Menü + PyObjC-Fenster) ist **nur Übergang**, kein Zielbild.
+Strategische Festlegung war: **bei Python bleiben und die UI vollständig auf PyObjC
+vereinheitlichen, rumps ablösen.** Eine Sprache, ein Repo, Tests bleiben, kein IPC.
+**Seit 2026-08-17 ist das erledigt** — `rumps` und `pync` sind aus Code, `requirements.txt`
+und Bundle verschwunden.
 
-Leitplanke für jede Änderung: **rumps-Kopplung nicht vertiefen** — neue UI ausschließlich
-PyObjC. Erledigte Bausteine: `settings_window.py` (rumps-frei) **und** `dialogs.py` (alle
-`rumps.alert`/`rumps.Window` durch native `NSAlert` ersetzt, Main-Thread-sicher).
+Umgesetzt in sechs einzeln ausgelieferten, je grün getesteten Schritten:
 
-Verbleibende, je eigenständig ausliefer- und testbare Bricks (verifizierte Teile bleiben bis
-dahin unangetastet):
-1. **Statusleiste** — `rumps.App`/`rumps.MenuItem` → `NSStatusItem` + `NSMenu`.
-2. **Timer** — `rumps.Timer` → `NSTimer`/`DispatchSource`.
-3. **Notifications** — `rumps.notification` → `UNUserNotificationCenter` (pync-Fallback entfällt).
-4. **Runloop + Dependency** — eigene `NSApplication`-Runloop, danach `rumps` aus `requirements.txt`.
+1. **Settings-Fenster** → `settings_window.py` (`NSWindow`/`NSGridView`).
+2. **Dialoge** → `dialogs.py` (`NSAlert` statt `rumps.alert`/`rumps.Window`).
+3. **Statusleiste** → `statusitem.py` (`NSStatusItem`/`NSMenu` statt `rumps.App`/`MenuItem`).
+4. **Timer** → `timers.py` (`NSTimer` statt `rumps.Timer`).
+5. **Notifications** → `notify.py` (`UNUserNotificationCenter` statt `rumps.notification`/pync).
+6. **Runloop + Dependency** → eigene `NSApplication`-Runloop in `app.main()`; rumps/pync raus.
 
-Reihenfolge minimiert Risiko (zuerst das Störende, zuletzt die stabile Runloop); jeder Brick hält
-die Suite grün. Verbleibende rumps-Nutzung in `app.py`: nur noch `App`/`MenuItem`/`separator`
-(Brick 1), `Timer` (Brick 2), `quit_application` (Brick 4).
+**Leitplanke bleibt:** neue UI ausschließlich PyObjC, und die UI-Schicht hält weiterhin keine
+evcc-Logik. Die Trennung „reine Datenschicht + dünne AppKit-Hülle" (`MenuEntry`,
+`build_settings`) ist das Muster für alles Weitere — sie ist der Grund, warum die UI
+überhaupt unit-testbar ist.

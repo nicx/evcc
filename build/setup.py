@@ -53,21 +53,22 @@ OPTIONS = {
         "CFBundleIdentifier": "io.evcc",
         "CFBundleShortVersionString": "0.1.0",
         "CFBundleVersion": "0.1.0",
-        "NSHumanReadableCopyright": "Privatgebrauch",
+        "NSHumanReadableCopyright": "MIT – nicx",
     },
     # Pakete vollständig einbetten (Quellpaket + Abhängigkeiten mit Binär-/Datenanteilen).
     "packages": [
         "src",
-        "rumps",
         "keyring",
-        "pync",
         "requests",
         "urllib3",
         "certifi",
         "charset_normalizer",
         "idna",
     ],
-    "includes": ["sqlite3"],
+    # AppKit/Foundation/UserNotifications werden **lazy in Funktionen** importiert (damit die
+    # Module ohne GUI importierbar bleiben). Explizit aufführen, damit sie sicher im Bundle
+    # landen und nicht von der Import-Analyse übersehen werden.
+    "includes": ["sqlite3", "objc", "AppKit", "Foundation", "UserNotifications"],
 }
 
 _ICON = os.path.join(HERE, "icon.icns")

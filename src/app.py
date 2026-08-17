@@ -1,8 +1,12 @@
-"""rumps-Menüleisten-App: Entrypoint, Menüaufbau, Scheduler, Event-Dispatch.
+"""Menüleisten-App (PyObjC/AppKit): Entrypoint, Menüaufbau, Scheduler, Event-Dispatch.
 
 Diese Schicht hält **keine** evcc-Logik — sie zeigt Status, steuert den launchd-Agenten
 über :mod:`src.lifecycle`, stößt Backups/Updates an und blockiert das UI nie (alles
 Langlaufende läuft im Hintergrund-Thread).
+
+Die UI besteht ausschließlich aus PyObjC-Bausteinen (:mod:`src.statusitem`,
+:mod:`src.timers`, :mod:`src.dialogs`, :mod:`src.settings_window`) — ``rumps`` ist
+vollständig abgelöst.
 
 Start (Entwicklung, ohne .app-Bundle)::
 
@@ -22,11 +26,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import rumps
-
-from . import autostart, backup, dialogs, health, lifecycle, logs, menubar_icon, notify, paths, updater
+from . import (autostart, backup, dialogs, health, lifecycle, logs, menubar_icon, notify,
+               paths, statusitem, timers, updater)
 from .config.settings import Settings, load_settings, save_settings
 from .notifier_state import NotifierState
+from .statusitem import SEPARATOR, MenuEntry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,13 +45,10 @@ _STATE_LINE = {
 }
 
 
-class EvccMenuApp(rumps.App):
+class EvccApp:
     """Menüleisten-Resident zur terminalfreien Verwaltung einer evcc-Instanz."""
 
     def __init__(self) -> None:
-        # quit_button=None: "Beenden" wird selbst hinzugefügt, da _rebuild_menu das Menü
-        # komplett neu aufbaut und rumps' Auto-Quit-Button dabei sonst verloren ginge.
-        super().__init__("evcc", title="evcc", quit_button=None)
         self.settings: Settings = load_settings()
         self._op_lock = threading.Lock()  # serialisiert Start/Stop/Update/Backup
         self._state: str = health.STOPPED
@@ -63,17 +64,19 @@ class EvccMenuApp(rumps.App):
         self._backup_scheduler = backup.BackupScheduler(
             backup.schedule_to_seconds(self.settings.backup.schedule), self._scheduled_backup)
 
+        self._status = statusitem.StatusItem()
         self._setup_menubar_icon()
         self._rebuild_menu()
 
         # Health-Poll-Timer (Intervall aus Settings) + schneller UI-Refresh-Timer.
-        self.health_timer = rumps.Timer(self._health_tick, max(5, self.settings.health.interval_seconds))
+        self.health_timer = timers.RepeatingTimer(
+            max(5, self.settings.health.interval_seconds), self._health_tick)
         self.health_timer.start()
-        self.ui_timer = rumps.Timer(self._ui_tick, UI_TICK_SECONDS)
+        self.ui_timer = timers.RepeatingTimer(UI_TICK_SECONDS, self._ui_tick)
         self.ui_timer.start()
         self._backup_scheduler.start()
         # Periodischer Update-Check (Default täglich; 0 h = aus).
-        self.update_timer = rumps.Timer(self._update_tick, 3600)
+        self.update_timer = timers.RepeatingTimer(3600, self._update_tick)
         self._apply_update_timer()
 
         # Beim Start einmal Zustand prüfen und (falls aktiviert) auf Updates schauen.
@@ -92,65 +95,57 @@ class EvccMenuApp(rumps.App):
         else:
             LOGGER.info("Periodischer Update-Check deaktiviert (0 h).")
 
-    def _update_tick(self, _timer) -> None:
+    def _update_tick(self) -> None:
         self._spawn(self._do_check_update)
 
     # -- Menüaufbau ----------------------------------------------------------
 
-    def _rebuild_menu(self) -> None:
-        """Baut das gesamte Menü neu auf (Struktur gem. Spec §6)."""
-        self.menu.clear()
+    def _menu_spec(self) -> list:
+        """Beschreibt das gesamte Menü als reine Daten (Struktur gem. Spec §6)."""
         items: list = []
 
-        status = rumps.MenuItem(_STATE_LINE.get(self._state, "evcc"))
-        status.set_callback(None)  # nur Info
-        items.append(status)
+        # Info-Zeilen ohne Callback sind automatisch deaktiviert.
+        items.append(MenuEntry(_STATE_LINE.get(self._state, "evcc")))
         if self._installed_version:
-            ver = rumps.MenuItem(f"Version: {self._installed_version}")
-            ver.set_callback(None)
-            items.append(ver)
-        items.append(rumps.separator)
+            items.append(MenuEntry(f"Version: {self._installed_version}"))
+        items.append(SEPARATOR)
 
-        items.append(rumps.MenuItem("Web-UI öffnen", callback=self._open_webui))
-        items.append(rumps.separator)
+        items.append(MenuEntry("Web-UI öffnen", self._open_webui))
+        items.append(SEPARATOR)
 
-        items.append(rumps.MenuItem("Start", callback=self._start))
-        items.append(rumps.MenuItem("Stop", callback=self._stop))
-        items.append(rumps.MenuItem("Neu starten", callback=self._restart))
-        items.append(rumps.separator)
+        items.append(MenuEntry("Start", self._start))
+        items.append(MenuEntry("Stop", self._stop))
+        items.append(MenuEntry("Neu starten", self._restart))
+        items.append(SEPARATOR)
 
-        items.append(rumps.MenuItem("Auf Update prüfen…", callback=self._check_update))
-        update_item = rumps.MenuItem("Update installieren…", callback=self._install_update)
-        if not self._update_available:
-            update_item.set_callback(None)  # nur aktiv, wenn neuere Version vorhanden
-            label_extra = ""
+        items.append(MenuEntry("Auf Update prüfen…", self._check_update))
+        if self._update_available:
+            version = updater.release_version(self._latest_release) or "neu"
+            items.append(MenuEntry(f"Update installieren… ({version})", self._install_update))
         else:
-            label_extra = f" ({updater.release_version(self._latest_release) or 'neu'})"
-        update_item.title = f"Update installieren…{label_extra}"
-        items.append(update_item)
-        items.append(rumps.MenuItem("Rollback auf vorherige Version…", callback=self._rollback))
-        items.append(rumps.separator)
+            items.append(MenuEntry("Update installieren…"))  # nur aktiv bei neuerer Version
+        items.append(MenuEntry("Rollback auf vorherige Version…", self._rollback))
+        items.append(SEPARATOR)
 
-        items.append(rumps.MenuItem("Backup jetzt", callback=self._backup_now))
-        items.append(self._logs_menu())
-        items.append(rumps.separator)
+        items.append(MenuEntry("Backup jetzt", self._backup_now))
+        # Log-Level liegt im Settings-Fenster; hier nur noch Log-Aktionen.
+        items.append(MenuEntry("Logs", children=[
+            MenuEntry("Log öffnen (Console)", self._open_log_console),
+            MenuEntry("Letzte 50 Zeilen", self._show_last_lines),
+        ]))
+        items.append(SEPARATOR)
 
-        items.append(rumps.MenuItem("Einstellungen…", callback=self._open_settings))
-        autostart_item = rumps.MenuItem("Beim Login starten", callback=self._toggle_autostart)
-        autostart_item.state = 1 if autostart.is_enabled() else 0
-        items.append(autostart_item)
-        items.append(rumps.separator)
-        items.append(rumps.MenuItem("Beenden", callback=self._quit))
+        items.append(MenuEntry("Einstellungen…", self._open_settings))
+        items.append(MenuEntry("Beim Login starten", self._toggle_autostart,
+                               checked=autostart.is_enabled()))
+        items.append(SEPARATOR)
+        items.append(MenuEntry("Beenden", self._quit))
+        return items
 
-        self.menu = items
+    def _rebuild_menu(self) -> None:
+        """Baut das gesamte Menü neu auf."""
+        self._status.set_menu(self._menu_spec())
         self._update_icon()
-
-    def _logs_menu(self) -> rumps.MenuItem:
-        # Log-Level liegt jetzt im Settings-Fenster; hier nur noch Log-Aktionen.
-        parent = rumps.MenuItem("Logs")
-        parent.add(rumps.MenuItem("Log öffnen (Console)", callback=self._open_log_console))
-        parent.add(rumps.MenuItem("Letzte 50 Zeilen", callback=self._show_last_lines))
-        return parent
 
     def _setup_menubar_icon(self) -> None:
         """Rendert die zwei Status-Icons (gefüllt=läuft, Outline=gestoppt) und setzt das Start-Icon."""
@@ -158,34 +153,27 @@ class EvccMenuApp(rumps.App):
         self._icon_running = icons.get("running")
         self._icon_stopped = icons.get("stopped")
         self._has_icon = bool(self._icon_running and self._icon_stopped)
-        self._current_icon: Optional[str] = None
         if self._has_icon:
-            self.template = True  # System tönt hell/dunkel
-            self.title = ""
-            self._set_icon(self._icon_stopped)  # bis der erste Healthcheck den Zustand kennt
+            self._status.set_title("")
+            self._status.set_icon(self._icon_stopped)  # bis der erste Healthcheck greift
         else:
-            self.title = "evcc"
-
-    def _set_icon(self, path: Optional[str]) -> None:
-        """Setzt das Menüleisten-Icon nur bei tatsächlichem Pfadwechsel (vermeidet Flackern)."""
-        if path and path != self._current_icon:
-            self.icon = path
-            self._current_icon = path
+            self._status.set_title("evcc")
 
     def _update_icon(self) -> None:
         problem = self._state == health.UNREACHABLE
         if self._has_icon:
             # Gefülltes Icon, wenn evcc läuft; sonst Outline. Bei „unreachable" zusätzlich
             # ein rotes Badge (Agent geladen, antwortet aber nicht).
-            self._set_icon(self._icon_running if self._state == health.RUNNING else self._icon_stopped)
-            self.title = " 🔴" if problem else ""
+            self._status.set_icon(
+                self._icon_running if self._state == health.RUNNING else self._icon_stopped)
+            self._status.set_title(" 🔴" if problem else "")
         else:
-            self.title = "evcc 🔴" if problem else "evcc"
+            self._status.set_title("evcc 🔴" if problem else "evcc")
 
     # -- Dialog-Helfer -------------------------------------------------------
 
     def _ask_text(self, message: str, title: str, default: str = "") -> Optional[str]:
-        # Native NSAlert-Texteingabe (rumps-frei, siehe :mod:`src.dialogs`).
+        # Native NSAlert-Texteingabe (siehe :mod:`src.dialogs`).
         return dialogs.ask_text(title, message, default)
 
     def _ask_yes_no(self, message: str, title: str) -> bool:
@@ -220,19 +208,19 @@ class EvccMenuApp(rumps.App):
 
     # -- Lifecycle-Aktionen --------------------------------------------------
 
-    def _open_webui(self, _sender=None) -> None:
+    def _open_webui(self) -> None:
         try:
             subprocess.run(["open", self.settings.health.url], check=False, timeout=10)
         except (OSError, subprocess.SubprocessError) as exc:
             dialogs.alert("Web-UI", f"Konnte {self.settings.health.url} nicht öffnen: {exc}")
 
-    def _start(self, _sender=None) -> None:
+    def _start(self) -> None:
         self._spawn(self._do_start)
 
-    def _stop(self, _sender=None) -> None:
+    def _stop(self) -> None:
         self._spawn(self._do_stop)
 
-    def _restart(self, _sender=None) -> None:
+    def _restart(self) -> None:
         self._spawn(self._do_restart)
 
     def _do_start(self) -> None:
@@ -310,7 +298,7 @@ class EvccMenuApp(rumps.App):
 
     # -- Updates -------------------------------------------------------------
 
-    def _check_update(self, _sender=None) -> None:
+    def _check_update(self) -> None:
         self._spawn(self._do_check_update)
 
     def _do_check_update(self) -> None:
@@ -345,7 +333,7 @@ class EvccMenuApp(rumps.App):
         else:
             notify.notify("evcc", f"Update verfügbar: {latest} (installiert: {self._installed_version or '—'})")
 
-    def _install_update(self, _sender=None) -> None:
+    def _install_update(self) -> None:
         if not self._update_available:
             return
         self._spawn(self._do_install_update)
@@ -377,7 +365,7 @@ class EvccMenuApp(rumps.App):
             self.notifier.problem("update_failed", "Healthcheck nach Update rot – evtl. Rollback nötig.")
         self._spawn(self._do_health)
 
-    def _rollback(self, _sender=None) -> None:
+    def _rollback(self) -> None:
         if not paths.evcc_binary_previous().exists():
             dialogs.alert("Rollback", "Kein Vorgänger-Binary vorhanden.")
             return
@@ -401,7 +389,7 @@ class EvccMenuApp(rumps.App):
 
     # -- Backup --------------------------------------------------------------
 
-    def _backup_now(self, _sender=None) -> None:
+    def _backup_now(self) -> None:
         self._spawn(lambda: self._run_backup(announce=True))
 
     def _scheduled_backup(self) -> None:
@@ -412,7 +400,8 @@ class EvccMenuApp(rumps.App):
         cfg = self.settings.backup
         if not cfg.target_path:
             if announce:
-                dialogs.alert("Backup", "Kein Backup-Ziel gesetzt. Bitte 'Backup-Ziel wählen…'.")
+                dialogs.alert("Backup", "Kein Backup-Ziel gesetzt. Bitte in den Einstellungen "
+                                        "ein Backup-Ziel wählen.")
             return False
         try:
             target = backup.hot_backup(paths.db_file(), Path(cfg.target_path), paths.evcc_yaml())
@@ -428,28 +417,14 @@ class EvccMenuApp(rumps.App):
                 dialogs.alert("Backup fehlgeschlagen", str(exc))
             return False
 
-    def _choose_backup_target(self, _sender=None) -> None:
-        d = self._ask_directory("Backup-Ziel wählen (z. B. UNAS-Pro-Share):",
-                                 default=self.settings.backup.target_path or None)
-        if not d:
-            return
-        self.settings.backup.target_path = d
-        save_settings(self.settings)
-        notify.notify("evcc", f"Backup-Ziel: {d}")
-
     # -- Logs ----------------------------------------------------------------
 
-    def _open_log_console(self, _sender=None) -> None:
+    def _open_log_console(self) -> None:
         logs.open_in_console(paths.evcc_log_file())
 
-    def _show_last_lines(self, _sender=None) -> None:
+    def _show_last_lines(self) -> None:
         text = logs.tail(paths.evcc_log_file(), 50) or "(Logfile noch leer oder nicht vorhanden.)"
         dialogs.show_text("evcc – letzte 50 Zeilen", text)
-
-    def _set_log_level(self, level: str, _sender=None) -> None:
-        self.settings.logging.level = level
-        save_settings(self.settings)
-        self._spawn(self._apply_log_level)
 
     def _apply_log_level(self) -> None:
         with self._op_lock:
@@ -461,7 +436,7 @@ class EvccMenuApp(rumps.App):
 
     # -- Einstellungen -------------------------------------------------------
 
-    def _open_settings(self, _sender=None) -> None:
+    def _open_settings(self) -> None:
         """Öffnet das native Settings-Fenster; Fallback auf die Dialogkette bei AppKit-Problemen."""
         from . import settings_window
 
@@ -478,11 +453,11 @@ class EvccMenuApp(rumps.App):
         save_settings(self.settings)
         self._apply_settings()
         if self.settings.logging.level != old_level:
-            self._spawn(self._apply_log_level)  # nur bei Änderung; threaded wie _set_log_level
+            self._spawn(self._apply_log_level)  # nur bei Änderung; threaded wie die Aktionen
         self._needs_rebuild = True
         notify.notify("evcc", "Einstellungen gespeichert.")
 
-    def _open_settings_legacy(self, _sender=None) -> None:
+    def _open_settings_legacy(self) -> None:
         """Fallback: sequenzielle Dialoge für Intervalle, Retention und Fehler-Mail (Abbruch beendet)."""
         s = self.settings
         val = self._ask_text("Backup-Zeitplan (hourly / daily / weekly):", "Einstellungen",
@@ -554,7 +529,7 @@ class EvccMenuApp(rumps.App):
 
     # -- Autostart der GUI-App ----------------------------------------------
 
-    def _toggle_autostart(self, sender) -> None:
+    def _toggle_autostart(self) -> None:
         """Login-Autostart der Menüleisten-App selbst (getrennt vom evcc-Agenten)."""
         if autostart.is_enabled():
             autostart.disable()
@@ -567,7 +542,7 @@ class EvccMenuApp(rumps.App):
                     "Im Entwicklungsmodus (python -m src.app) ist er nicht verfügbar.")
                 return
             autostart.enable(args)
-        sender.state = 1 if autostart.is_enabled() else 0
+        self._needs_rebuild = True  # Häkchen über den regulären Menü-Neuaufbau nachziehen
 
     @staticmethod
     def _autostart_program_args() -> Optional[list[str]]:
@@ -589,13 +564,18 @@ class EvccMenuApp(rumps.App):
             pass
         return [os.path.join(macos_dir, exe_name)]
 
-    def _quit(self, _sender=None) -> None:
+    def _quit(self) -> None:
+        import AppKit
+
         self._backup_scheduler.stop()
-        rumps.quit_application()
+        self.health_timer.stop()
+        self.ui_timer.stop()
+        self.update_timer.stop()
+        AppKit.NSApplication.sharedApplication().terminate_(None)
 
     # -- Health / Timer ------------------------------------------------------
 
-    def _health_tick(self, _timer) -> None:
+    def _health_tick(self) -> None:
         self._spawn(self._do_health)
 
     def _do_health(self) -> None:
@@ -618,7 +598,7 @@ class EvccMenuApp(rumps.App):
                 lifecycle.kickstart()  # Agent öffnet die (frische) Logdatei neu
         self._needs_rebuild = True
 
-    def _ui_tick(self, _timer) -> None:
+    def _ui_tick(self) -> None:
         """Schneller UI-Refresh auf dem Main-Thread (Icon + ggf. Menü-Neuaufbau)."""
         self._update_icon()
         if self._needs_rebuild:
@@ -674,9 +654,21 @@ def _setup_logging() -> None:
 
 
 def main() -> None:
+    """Startet die Menüleisten-App und übergibt an den AppKit-Runloop."""
+    import AppKit
+
     _setup_logging()
     LOGGER.info("evcc startet (Log: %s)", paths.app_log_file())
-    EvccMenuApp().run()
+
+    ns_app = AppKit.NSApplication.sharedApplication()
+    # „Accessory": Menüleisten-Resident ohne Dock-Icon und ohne Menüleisten-Hauptmenü.
+    # Entspricht LSUIElement aus der Info.plist, gilt aber auch im Dev-Modus ohne Bundle.
+    ns_app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+
+    app = EvccApp()  # Referenz halten: Status-Item und Timer hängen daran
+    LOGGER.info("Menüleisten-Item aktiv, Runloop startet.")
+    ns_app.run()
+    LOGGER.info("Runloop beendet (%r).", app.__class__.__name__)
 
 
 if __name__ == "__main__":

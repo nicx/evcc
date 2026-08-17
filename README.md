@@ -4,9 +4,10 @@ Native macOS-Menüleisten-App zur **terminalfreien** Verwaltung einer manuell in
 evcc-Instanz: Install, Start/Stop/Restart, Updates mit Rollback, automatische SQLite-Backups,
 Log-Einsicht und E-Mail-Alarm bei Problemen.
 
-Stack: Python · rumps · py2app · launchd · SQLite · MailRelay. Notifier-, Config-/Keychain-,
-LaunchAgent- und Icon-Bausteine sind aus dem Schwesterprojekt `icloud-sync` portiert.
-Vollständige Spezifikation: [evcc-app-spec.md](evcc-app-spec.md).
+Stack: Python · PyObjC/AppKit · py2app · launchd · SQLite · MailRelay. Die Menüleisten-UI
+(Status-Item, Menü, Timer, Dialoge, Notifications) ist durchgängig nativ — ohne `rumps`.
+Notifier-, Config-/Keychain-, LaunchAgent- und Icon-Bausteine sind aus dem Schwesterprojekt
+`icloud-sync` portiert. Vollständige Spezifikation: [evcc-app-spec.md](evcc-app-spec.md).
 
 ## Architektur in Kürze
 
