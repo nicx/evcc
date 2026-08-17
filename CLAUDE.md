@@ -95,11 +95,27 @@ Outline + rotes Badge `🔴` = nicht erreichbar. Alles Template-Images (auto-get
 .venv/bin/python -m src.app
 # Tests (mock-frei, kein Netz) — derzeit 56 grün
 for t in tests/test_*.py; do .venv/bin/python "$t"; done
-# Build der .app (py2app + ad-hoc-Signierung + verify)
+# Build der .app (py2app + Signierung + verify)
 .venv/bin/pip install -r requirements-build.txt
-bash build/build.sh           # → dist/evcc.app
+CODESIGN_IDENTITY="nicx Selfsign" bash build/build.sh   # → dist/evcc.app
 ```
-Erststart der gebauten App: Rechtsklick → „Öffnen" (ad-hoc signiert → Gatekeeper).
+Erststart der gebauten App: Rechtsklick → „Öffnen" (nicht notarisiert → Gatekeeper).
+
+### Signierung: immer mit stabiler Identität bauen
+`build/build.sh` signiert per Default **ad-hoc** (`-`), damit der Build auch ohne Zertifikat
+läuft. Ad-hoc heißt aber: die Code-Identität wechselt bei **jedem** Rebuild → macOS erkennt die
+App nicht wieder und vergisst erteilte Berechtigungen (**Mitteilungen**, Gatekeeper).
+
+Daher lokal immer `CODESIGN_IDENTITY="nicx Selfsign"` setzen — ein selbstsigniertes
+Code-Signing-Zertifikat (angelegt 2026-08-17, gültig bis 2036, Trust-Policy „Code Signing" in
+der User-Domain). Es ist **projektübergreifend** gedacht: dieselbe Identität für alle
+nicx-Menüleisten-Apps. Prüfen mit `security find-identity -v -p codesigning`; die Signatur
+eines Bundles zeigt `codesign -dv --verbose=2 dist/evcc.app` (erwartet:
+`Authority=nicx Selfsign`, `flags=0x0(none)` — **nicht** `0x2(adhoc)`).
+
+Eine Team-ID hat die Identität nicht (kein bezahlter Developer-Account), daher bleibt sie auf
+**Gatekeeper + TCC/Mitteilungen** beschränkt; für Verteilung an Dritte bräuchte es Developer ID
++ Notarisierung.
 Build/dist/venv/Logs/DB sind via `.gitignore` ausgeschlossen.
 
 ## Konventionen
