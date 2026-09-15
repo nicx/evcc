@@ -170,14 +170,31 @@ def extract_evcc_from_tar(tar_path: Path, dest: Path) -> Path:
     return dest
 
 
+def _replace_binary_atomically(src: Path, dest: Path) -> None:
+    """Kopiert ``src`` nach ``dest`` über ``.part`` + atomaren ``rename`` (neue Inode).
+
+    **Nie** ein bestehendes, ausführbares Mach-O-Binary in-place überschreiben (z. B. via
+    ``shutil.copy2`` direkt auf ``dest``): macOS' Laufzeit-Signaturprüfung (taskgated/AMFI)
+    cached ihr Ergebnis pro Datei/Inode. Ein In-Place-Write auf eine kürzlich ausgeführte
+    Datei kann diesen Cache inkonsistent machen — die Datei ist inhaltlich unverändert und
+    ``codesign --verify`` sieht sie als gültig an, der nächste Start wird aber trotzdem mit
+    ``SIGKILL (Code Signature Invalid)`` getötet (beobachtet 2026-09-15, siehe CLAUDE.md).
+    ``rename`` erzeugt dagegen eine frische Inode → der Kernel prüft die Signatur neu, statt
+    einen möglicherweise verunreinigten Cache-Eintrag wiederzuverwenden.
+    """
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    shutil.copy2(src, tmp)
+    tmp.chmod(0o755)
+    tmp.replace(dest)
+
+
 def save_previous() -> Optional[Path]:
     """Sichert das aktuelle Binary nach ``evcc.previous`` (für Rollback). None, wenn keins da."""
     current = paths.evcc_binary()
     if not current.exists():
         return None
     prev = paths.evcc_binary_previous()
-    shutil.copy2(current, prev)
-    prev.chmod(0o755)
+    _replace_binary_atomically(current, prev)
     return prev
 
 
@@ -188,8 +205,7 @@ def rollback() -> bool:
         LOGGER.warning("Kein Vorgänger-Binary für Rollback vorhanden: %s", prev)
         return False
     target = paths.evcc_binary()
-    shutil.copy2(prev, target)
-    target.chmod(0o755)
+    _replace_binary_atomically(prev, target)
     remove_quarantine(target)
     LOGGER.info("Rollback auf vorheriges Binary durchgeführt")
     return True

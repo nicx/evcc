@@ -93,7 +93,7 @@ Outline + rotes Badge `🔴` = nicht erreichbar. Alles Template-Images (auto-get
 .venv/bin/pip install -r requirements.txt
 # Dev-Run (Menüleisten-App ohne Bundle)
 .venv/bin/python -m src.app
-# Tests (mock-frei, kein Netz) — derzeit 56 grün
+# Tests (mock-frei, kein Netz) — derzeit 61 grün
 for t in tests/test_*.py; do .venv/bin/python "$t"; done
 # Build der .app (py2app + Signierung + verify)
 .venv/bin/pip install -r requirements-build.txt
@@ -132,6 +132,23 @@ Build/dist/venv/Logs/DB sind via `.gitignore` ausgeschlossen.
   hier zuerst schauen.
 - **Rollback nur bei kompatibler DB:** ein Binary-Downgrade nach einem Schema-Upgrade kann
   scheitern → im Zweifel zusätzlich das DB-Backup zurückspielen (im UI so kommuniziert).
+- **Binary-Ersetzung immer per `rename`, nie in-place** (`lifecycle._replace_binary_atomically`,
+  genutzt von `save_previous`/`rollback`; `download_file`/`extract_evcc_from_tar` machten es
+  schon richtig). Beobachtet am 2026-09-15: ein automatischer Update-Check scheiterte, weil
+  GitHub das Release-Tag `0.315.1` schon führte, die Asset-Dateien aber noch nicht hochgeladen
+  waren (`select_asset` → `None`) — danach lief planmäßig `rollback()`, das damals noch
+  `shutil.copy2()` **direkt auf das aktive Binary** schrieb. Der Agent crashte danach bei
+  jedem Start mit `SIGKILL (Code Signature Invalid)` (Crash-Report:
+  `termination.indicator: "Taskgated Invalid Signature"`), obwohl `codesign --verify` die
+  Datei als gültig meldete und ihr Hash exakt dem funktionierenden `evcc.previous` entsprach.
+  Ursache: macOS' Laufzeit-Signaturprüfung (taskgated/AMFI) cached ihr Ergebnis pro Datei/
+  Inode; ein In-Place-Write auf ein kürzlich ausgeführtes Mach-O-Binary macht diesen Cache
+  inkonsistent. Fix: die Datei bei jeder Ersetzung neu anlegen (`.part` + `Path.replace`,
+  wie der Download-Pfad es schon tat) → neue Inode → der Kernel prüft die Signatur frisch.
+  **Symptom, falls es doch wieder auftritt:** `evcc -v` (oder der Agent) stirbt sofort mit
+  Exit 137; `~/Library/Logs/DiagnosticReports/evcc-*.ips` zeigt `"namespace":"CODESIGNING"`.
+  Sofort-Fix ohne Codeänderung: Binary durch eine **neue** Datei ersetzen (nicht
+  überschreiben) — z. B. `cp evcc.previous evcc.new && mv evcc.new evcc`.
 - **GUI-Autostart nur im gebauten Bundle** (`sys.frozen`), nicht im Dev-Modus
   (`python -m src.app`) — `autostart` löst sonst keine sinnvollen ProgramArguments auf.
 - **Menüleisten-Icons müssen quadratisch sein:** `statusitem` setzt das Icon per
