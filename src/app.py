@@ -61,6 +61,7 @@ class EvccApp:
         self.notifier = NotifierState(lambda: self.settings.notifications)
         self._health = health.HealthMonitor(
             self.settings.health.url, self.settings.health.failure_threshold)
+        self._optimizer = health.OptimizerMonitor(self.settings.health.url)
         self._backup_scheduler = backup.BackupScheduler(
             backup.schedule_to_seconds(self.settings.backup.schedule), self._scheduled_backup)
 
@@ -595,11 +596,27 @@ class EvccApp:
                     f"{self._health.consecutive_failures} fehlgeschlagene Polls an {url}.")
             else:
                 self.notifier.healthy("evcc_unreachable")
+            if state == health.RUNNING:
+                self._check_optimizer(url)
         # App-seitige Logrotation (launchd rotiert nicht).
         if logs.rotate_if_needed(paths.evcc_log_file(), self.settings.logging.max_size_mb):
             if lifecycle.is_loaded():
                 lifecycle.kickstart()  # Agent öffnet die (frische) Logdatei neu
         self._needs_rebuild = True
+
+    def _check_optimizer(self, url: str) -> None:
+        """Meldet dauerhaft ``Infeasible``-Läufe des evcc-Optimizers (siehe OptimizerMonitor)."""
+        if self._optimizer.base_url != url:
+            self._optimizer = health.OptimizerMonitor(url)
+        self._optimizer.check()
+        if self._optimizer.is_problem:
+            self.notifier.problem(
+                "optimizer_infeasible",
+                f"{self._optimizer.consecutive_failures} Optimizer-Läufe in Folge ohne Lösung. "
+                "Üblich: Ausreißerzeile in evcc.db (Tabelle meters, Spalte energy) verfälscht "
+                "das Verbrauchsprofil; Zeile prüfen/löschen (siehe evcc-Issue #34039).")
+        elif self._optimizer.consecutive_failures == 0:
+            self.notifier.healthy("optimizer_infeasible")
 
     def _ui_tick(self) -> None:
         """Schneller UI-Refresh auf dem Main-Thread (Icon + ggf. Menü-Neuaufbau)."""

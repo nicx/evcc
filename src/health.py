@@ -7,6 +7,7 @@ die Notifier-State-Machine (erst nach N Fehlversuchen in Folge gilt es als "Prob
 
 from __future__ import annotations
 
+import json
 import logging
 import urllib.error
 import urllib.request
@@ -63,3 +64,57 @@ class HealthMonitor:
     @property
     def consecutive_failures(self) -> int:
         return self._consecutive_failures
+
+
+def optimizer_run(base_url: str, timeout: float = 5.0) -> tuple[str, str] | None:
+    """Liest den letzten Optimizer-Lauf aus ``/api/state``: ``(updated, status)``.
+
+    ``None``, wenn nicht ermittelbar (evcc nicht erreichbar, Optimizer aus, noch kein Lauf,
+    unerwartete Antwort). Der Lauf-Zeitstempel erlaubt es, mehrfaches Pollen desselben
+    Laufs nicht als neue Runde zu zählen.
+    """
+    req = urllib.request.Request(base_url.rstrip("/") + "/api/state", method="GET",
+                                 headers={"User-Agent": "evcc"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            evopt = json.load(resp).get("evopt") or {}
+        updated, status = evopt.get("updated"), (evopt.get("res") or {}).get("status")
+    except (urllib.error.URLError, OSError, ValueError, AttributeError) as exc:
+        LOGGER.debug("Optimizer-Status nicht lesbar: %s", exc)
+        return None
+    if not updated or not status:
+        return None
+    return str(updated), str(status)
+
+
+class OptimizerMonitor:
+    """Zählt aufeinanderfolgende **verschiedene** Optimizer-Läufe mit Status ``Infeasible``.
+
+    Hintergrund: Ein Ausreißer in ``meters`` (z. B. Zählerfehler) macht den Optimizer
+    wochenlang unlösbar, ohne dass es auffällt. Erst ``failure_threshold`` Läufe in Folge
+    gelten als Problem (der Optimizer läuft ca. alle 15 min), ein ``Feasible`` setzt zurück.
+    """
+
+    def __init__(self, base_url: str, failure_threshold: int = 3) -> None:
+        self.base_url = base_url
+        self.failure_threshold = max(1, failure_threshold)
+        self._consecutive = 0
+        self._last_updated: str | None = None
+
+    def check(self, timeout: float = 5.0) -> None:
+        run = optimizer_run(self.base_url, timeout=timeout)
+        if run is None:
+            return  # unbekannt -> Zustand unverändert lassen
+        updated, status = run
+        if updated == self._last_updated:
+            return  # derselbe Lauf wie beim letzten Poll
+        self._last_updated = updated
+        self._consecutive = self._consecutive + 1 if status == "Infeasible" else 0
+
+    @property
+    def is_problem(self) -> bool:
+        return self._consecutive >= self.failure_threshold
+
+    @property
+    def consecutive_failures(self) -> int:
+        return self._consecutive

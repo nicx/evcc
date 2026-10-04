@@ -24,6 +24,8 @@ CONDITIONS: dict[str, tuple[str, str]] = {
     "evcc_unreachable": ("evcc nicht erreichbar", "evcc wieder erreichbar"),
     "backup_failed": ("evcc-Backup fehlgeschlagen", "evcc-Backup wieder erfolgreich"),
     "update_failed": ("evcc-Update fehlgeschlagen", "evcc-Update-Problem behoben"),
+    "optimizer_infeasible": ("evcc-Optimizer unlösbar (Infeasible)",
+                             "evcc-Optimizer wieder lösbar"),
     "db_migration": ("evcc-DB-Migration auffällig", "evcc-DB-Migration behoben"),
 }
 
