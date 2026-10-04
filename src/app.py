@@ -255,7 +255,10 @@ class EvccApp:
     def _install_latest_binary(self) -> bool:
         """Lädt das jüngste Release-Binary und installiert es. True bei Erfolg."""
         try:
-            release = self._latest_release or updater.fetch_latest_release()
+            # Immer frisch holen: das beim Check gecachte Release kann noch ohne Assets sein
+            # (GitHub lädt sie erst nach dem Veröffentlichen hoch) → sonst Dauerfehler.
+            release = updater.fetch_latest_release()
+            self._latest_release = release
             asset = updater.select_asset(release)
             if asset is None:
                 self.notifier.problem("update_failed", "Kein macOS-Asset im Release gefunden.")
