@@ -76,6 +76,7 @@ damit eine frische Claude-Session (auch auf einem anderen Mac) sofort produktiv 
 ## Mail-Verhalten (wann kommt eine Mail?)
 Nur wenn Fehler-Mail aktiviert + Empfänger gesetzt:
 - **evcc_unreachable**: Agent geladen, antwortet `failure_threshold`× (Default 3) nicht → 1 Problem-Mail, später 1 Recovery.
+- **Update-Timing**: GitHub veröffentlicht evcc-Releases oft Minuten (bis >5 min) VOR den Asset-Dateien. `_do_check_update` bietet/mailt ein Update daher erst, wenn `select_asset` ein macOS-Tarball findet; `_do_install_update` prüft das Asset VOR Backup/`bootout`, damit evcc bei fehlendem Asset nicht unnötig gestoppt wird und keine `update_failed`-Mail rausgeht (Vorfälle 2026-09-15, 10-04, 10-09).
 - **optimizer_infeasible**: `/api/state` → `evopt.res.status` 3 verschiedene Läufe in Folge `Infeasible` (Lauf-Zeitstempel `evopt.updated`, Optimizer ~alle 15 min) → 1 Problem-Mail, `Feasible` → Recovery. Übliche Ursache: Ausreißerzeile in `evcc.db` `meters` (Zählerfehler) verfälscht das Verbrauchsprofil, siehe evcc-Issue #34039.
 - **backup_failed** / **update_failed**: je 1 Problem + 1 Recovery.
 - **Update verfügbar**: 1 Mail pro Version (dedupliziert über `updates.last_notified_version`).

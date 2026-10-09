@@ -315,8 +315,14 @@ class EvccApp:
         self._latest_release = release
         self._installed_version = updater.installed_version(paths.evcc_binary())
         latest = updater.release_version(release)
-        self._update_available = updater.is_newer(latest, self._installed_version)
+        newer = updater.is_newer(latest, self._installed_version)
+        # Neues Release ohne macOS-Asset (Upload läuft noch) gilt noch nicht als verfügbar —
+        # weder im Menü anbieten noch mailen; der nächste Check holt es nach.
+        self._update_available = newer and updater.select_asset(release) is not None
         self._needs_rebuild = True
+        if newer and not self._update_available:
+            LOGGER.info("Release %s noch ohne macOS-Asset – wird beim nächsten Check erneut geprüft", latest)
+            return
         if not self._update_available:
             notify.notify("evcc", f"evcc ist aktuell ({self._installed_version or '—'}).")
             return
@@ -343,6 +349,21 @@ class EvccApp:
         self._spawn(self._do_install_update)
 
     def _do_install_update(self) -> None:
+        # Vorab prüfen: GitHub veröffentlicht das Release oft Minuten VOR den Dateien. Dann
+        # weder evcc stoppen noch Fehlermail senden, sondern später erneut versuchen lassen.
+        try:
+            release = updater.fetch_latest_release()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Update nicht möglich, Release nicht abrufbar: %s", exc)
+            notify.notify("evcc", f"Update nicht möglich: {exc}")
+            return
+        self._latest_release = release
+        if updater.select_asset(release) is None:
+            LOGGER.info("Release %s hat noch kein macOS-Asset – Update verschoben",
+                        updater.release_version(release))
+            notify.notify("evcc", "Das neue Release ist noch nicht vollständig (macOS-Datei "
+                                  "fehlt). Bitte in ein paar Minuten erneut versuchen.")
+            return
         with self._op_lock:
             # 1) Backup erzwingen (nur, wenn Ziel konfiguriert/erreichbar).
             if self.settings.backup.target_path:
